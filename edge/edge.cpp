@@ -9,6 +9,7 @@ Edge::Edge()
   this->dr = new DataReceiver();
   this->nm = new NetworkManager();
   this->pm = new ProcessManager();
+  this->vector_id = 2;  // 기본값: 5D
 }
 
 Edge::~Edge()
@@ -23,6 +24,7 @@ Edge::Edge(const char *addr, int port)
   this->dr = new DataReceiver();
   this->nm = new NetworkManager(addr, port);
   this->pm = new ProcessManager();
+  this->vector_id = 2;  // 기본값: 5D
 }
 
 void Edge::init()
@@ -30,6 +32,12 @@ void Edge::init()
   this->dr->init();
   this->nm->init();
   this->pm->init();
+}
+
+void Edge::setVectorID(int id)
+{
+  this->vector_id = id;           // vector_id 저장
+  this->pm->setVectorID(id);      // ProcessManager에도 설정
 }
 
 void Edge::run()
@@ -48,9 +56,11 @@ void Edge::run()
   {
     ds = this->dr->getDataSet(curr);
     data = this->pm->processData(ds, &dlen);
-    this->nm->sendData(data, dlen);
-    opcode = this->nm->receiveCommand();
 
+    // ✅ vector_id 포함해서 전송
+    this->nm->sendData(data, dlen, this->vector_id);
+
+    opcode = this->nm->receiveCommand();
     curr += 86400;
   }
 

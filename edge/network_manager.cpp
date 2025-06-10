@@ -73,38 +73,26 @@ int NetworkManager::init()
   return sock;
 }
 
-// TODO: You should revise the following code
-int NetworkManager::sendData(uint8_t *data, int dlen)
+int NetworkManager::sendData(uint8_t *data, int dlen, uint8_t vector_id)
 {
-  int sock, tbs, sent, offset, num, jlen;
-  unsigned char opcode;
-  uint8_t n[4];
-  uint8_t *p;
+  int sock = this->sock;
 
-  sock = this->sock;
-  // Example) data (processed by ProcessManager) consists of:
-  // Example) minimum temperature (1 byte) || minimum humidity (1 byte) || minimum power (2 bytes) || month (1 byte)
-  // Example) edge -> server: opcode (OPCODE_DATA, 1 byte)
-  opcode = OPCODE_DATA;
-  tbs = 1; offset = 0;
-  while (offset < tbs)
-  {
-    sent = write(sock, &opcode + offset, tbs - offset);
+  int total_len = 1 + 1 + dlen;  // opcode + vector_id + data
+  uint8_t *buf = new uint8_t[total_len];
+
+  buf[0] = OPCODE_DATA;     // 1 byte
+  buf[1] = vector_id;       // 1 byte
+  memcpy(buf + 2, data, dlen);  // dlen: 8, 12, or 20
+
+  int offset = 0;
+  while (offset < total_len) {
+    int sent = write(sock, buf + offset, total_len - offset);
     if (sent > 0)
       offset += sent;
   }
-  assert(offset == tbs);
 
-  // Example) edge -> server: temperature (1 byte) || humidity (1 byte) || power (2 bytes) || month (1 byte)
-  tbs = 5; offset = 0;
-  while (offset < tbs)
-  {
-    sent = write(sock, data + offset, tbs - offset);
-    if (sent > 0)
-      offset += sent;
-  }
-  assert(offset == tbs);
-
+  assert(offset == total_len);
+  delete[] buf;
   return 0;
 }
 

@@ -5,77 +5,80 @@
 #include <cstring>
 #include <iostream>
 #include <ctime>
+#include <cmath>
 using namespace std;
 
 ProcessManager::ProcessManager()
 {
   this->num = 0;
+  this->vector_id = 2; // 기본은 5D
 }
 
 void ProcessManager::init()
 {
 }
 
-// TODO: You should implement this function if you want to change the result of the aggregation
+void ProcessManager::setVectorID(int id)
+{
+  this->vector_id = id;
+}
+
 uint8_t *ProcessManager::processData(DataSet *ds, int *dlen)
 {
-  uint8_t *ret, *p;
-  int num, len;
-  HouseData *house;
-  Info *info;
-  TemperatureData *tdata;
-  HumidityData *hdata;
-  PowerData *pdata;
-  char buf[BUFLEN];
-  ret = (uint8_t *)malloc(BUFLEN);
-  int tmp, min_humid, min_temp, min_power, month;
-  time_t ts;
-  struct tm *tm;
-
-  tdata = ds->getTemperatureData();
-  hdata = ds->getHumidityData();
-  num = ds->getNumHouseData();
-
-  // Example) I will give the minimum daily temperature (1 byte), the minimum daily humidity (1 byte), 
-  // the minimum power data (2 bytes), the month value (1 byte) to the network manager
-  
-  // Example) getting the minimum daily temperature
-  min_temp = (int) tdata->getMin();
-
-  // Example) getting the minimum daily humidity
-  min_humid = (int) hdata->getMin();
-
-  // Example) getting the minimum power value
-  min_power = 10000;
-  for (int i=0; i<num; i++)
-  {
-    house = ds->getHouseData(i);
-    pdata = house->getPowerData();
-    tmp = (int)pdata->getValue();
-
-    if (tmp < min_power)
-      min_power = tmp;
-  }
-
-  // Example) getting the month value from the timestamp
-  ts = ds->getTimestamp();
-  tm = localtime(&ts);
-  month = tm->tm_mon + 1;
-
-  // Example) initializing the memory to send to the network manager
+  uint8_t *ret = (uint8_t *)malloc(BUFLEN);
   memset(ret, 0, BUFLEN);
   *dlen = 0;
-  p = ret;
+  uint8_t *p = ret;
 
-  // Example) saving the values in the memory
-  VAR_TO_MEM_1BYTE_BIG_ENDIAN(min_temp, p);
-  *dlen += 1;
-  VAR_TO_MEM_1BYTE_BIG_ENDIAN(min_humid, p);
-  *dlen += 1;
-  VAR_TO_MEM_2BYTES_BIG_ENDIAN(min_power, p);
-  *dlen += 2;
-  VAR_TO_MEM_1BYTE_BIG_ENDIAN(month, p);
-  *dlen += 1;
+  TemperatureData *tdata = ds->getTemperatureData();
+  HumidityData *hdata = ds->getHumidityData();
+  int num = ds->getNumHouseData();
+
+  time_t ts = ds->getTimestamp();
+  struct tm *tm = localtime(&ts);
+  int month = tm->tm_mon + 1;
+  int year = tm->tm_year + 1900;
+
+  float max_temp = tdata->getMax();
+  float max_humid = hdata->getMax();
+
+  float humid_sum = 0.0;
+  float power_sum = 0.0;
+
+  for (int i = 0; i < num; ++i) {
+    HouseData *house = ds->getHouseData(i);
+    PowerData *pdata = house->getPowerData();
+
+    power_sum += pdata->getValue();
+  }
+
+  float avg_power = power_sum / num;
+  float avg_humid = humid_sum / num;
+
+  // === 벡터 분기 처리 ===
+  if (vector_id == 2) {
+    // [max_humid, max_temp, month, year, avg_power]
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&max_humid), p); *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&max_temp), p);  *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&month), p);     *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&year), p);      *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&avg_power), p); *dlen += 4;
+
+  } else if (vector_id == 1) {
+    // [max_temp, avg_humid, avg_power]
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&max_temp), p);   *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&avg_humid), p);  *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&avg_power), p);  *dlen += 4;
+
+  } else if (vector_id == 0) {
+    // [discomfort_index, avg_power]
+    float discomfort = 0.81 * max_temp + 0.01 * avg_humid * (0.99 * max_temp - 14.3) + 46.3;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&discomfort), p); *dlen += 4;
+    VAR_TO_MEM_4BYTES_BIG_ENDIAN(*((uint32_t *)&avg_power), p);  *dlen += 4;
+
+  } else {
+    cout << "[!] Unknown vector ID: " << vector_id << endl;
+  }
 
   return ret;
 }

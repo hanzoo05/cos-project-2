@@ -199,7 +199,7 @@ class ModelGenerator(Resource):
 
     def post(self, model_id):
         ret = {}
-        args = json.loads(request.get_json(force=True))
+        args = request.get_json(force=True)
         if "algorithm" not in args:
             ret["opcode"] = "failure"
             ret["reason"] = "the algorithm parameter is missing"

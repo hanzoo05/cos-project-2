@@ -5,12 +5,15 @@
 #include <cstdint>
 
 class ProcessManager {
-  private:
+private:
     int num;
-  public:
-    ProcessManager();
+    int vector_id;
 
+public:
+    ProcessManager();
     void init();
+
+    void setVectorID(int id);
     uint8_t *processData(DataSet *ds, int *dlen);
 };
 

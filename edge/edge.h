@@ -11,6 +11,7 @@ class Edge {
     DataReceiver *dr;
     NetworkManager *nm;
     ProcessManager *pm;
+    int vector_id;
 
   public:
     Edge();
@@ -23,6 +24,8 @@ class Edge {
 
     void setPort(int port);
     int getPort();
+
+    void setVectorID(int id);
 
     void init();
     void run();

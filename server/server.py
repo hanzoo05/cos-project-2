@@ -5,237 +5,147 @@ import argparse
 import logging
 import json
 import sys
+import struct
 
 OPCODE_DATA = 1
 OPCODE_WAIT = 2
 OPCODE_DONE = 3
 OPCODE_QUIT = 4
 
+VECTOR_INFO = {
+    0: {"dim": 2, "index": 1},  # discomfort_index, avg_power
+    1: {"dim": 3, "index": 2},  # max_temp, avg_humid, avg_power
+    2: {"dim": 5, "index": 4},  # max_humid, max_temp, month, year, avg_power
+}
+
 class Server:
-    def __init__(self, name, algorithm, dimension, index, port, caddr, cport, ntrain, ntest):
-        logging.info("[*] Initializing the server module to receive data from the edge device")
+    def __init__(self, name, algorithm, port, caddr, cport, ntrain, ntest):
         self.name = name
         self.algorithm = algorithm
-        self.dimension = dimension
-        self.index = index
+        self.port = port
         self.caddr = caddr
         self.cport = cport
         self.ntrain = ntrain
         self.ntest = ntest
-        success = self.connecter()
 
-        if success:
-            self.port = port
-            self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-            self.socket.bind(("0.0.0.0", port))
-            self.socket.listen(10)
-            self.listener()
+        self._init_models()
 
-    def connecter(self):
-        success = True
-        self.ai = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.ai.connect((self.caddr, self.cport))
-        url = "http://{}:{}/{}".format(self.caddr, self.cport, self.name)
-        request = {}
-        request['algorithm'] = self.algorithm
-        request['dimension'] = self.dimension
-        request['index'] = self.index
-        js = json.dumps(request)
-        logging.debug("[*] To be sent to the AI module: {}".format(js))
-        result = requests.post(url, json=js)
-        response = json.loads(result.content)
-        logging.debug("[*] Received: {}".format(response))
+        self.socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        self.socket.bind(("0.0.0.0", port))
+        self.socket.listen(10)
+        logging.info("[*] Server is listening on port {}".format(port))
+        threading.Thread(target=self.listener).start()
 
-        if "opcode" not in response:
-            logging.debug("[*] Invalid response")
-            success = False
-        else:
-            if response["opcode"] == "failure":
-                logging.error("Error happened")
-                if "reason" in response:
-                    logging.error("Reason: {}".format(response["reason"]))
-                    logging.error("Please try again.")
+    def _init_models(self):
+        for vid, info in VECTOR_INFO.items():
+            model_name = f"{self.name}_vec{vid}"
+            url = f"http://{self.caddr}:{self.cport}/{model_name}"
+            payload = {
+                "algorithm": self.algorithm,
+                "dimension": info["dim"],
+                "index": info["index"]
+            }
+            try:
+                res = requests.post(url, json=payload)
+                if res.status_code == 200:
+                    logging.info(f"[*] Created model: {model_name}")
                 else:
-                    logging.error("Reason: unknown. not specified")
-                success = False
-            else:
-                assert response["opcode"] == "success"
-                logging.info("[*] Successfully connected to the AI module")
-        return success
+                    logging.warning(f"[!] Failed to create model {model_name} (status {res.status_code})")
+            except Exception as e:
+                logging.error(f"[!] Exception while creating model {model_name}: {e}")
 
     def listener(self):
-        logging.info("[*] Server is listening on 0.0.0.0:{}".format(self.port))
-
         while True:
-            client, info = self.socket.accept()
-            logging.info("[*] Server accept the connection from {}:{}".format(info[0], info[1]))
+            client, addr = self.socket.accept()
+            logging.info("[*] Connection from {}:{}".format(*addr))
+            threading.Thread(target=self.handler, args=(client,)).start()
 
-            client_handle = threading.Thread(target=self.handler, args=(client,))
-            client_handle.start()
+    def parse_and_send(self, vector_id, buf, is_training):
+        if vector_id not in VECTOR_INFO:
+            logging.error("Invalid vector ID: {}".format(vector_id))
+            return
 
-    def send_instance(self, vlst, is_training):
-        if is_training:
-            url = "http://{}:{}/{}/training".format(self.caddr, self.cport, self.name)
-        else:
-            url = "http://{}:{}/{}/testing".format(self.caddr, self.cport, self.name)
-        data = {}
-        data["value"] = vlst
-        req = json.dumps(data)
-        response = requests.put(url, json=req)
-        resp = response.json()
+        dim = VECTOR_INFO[vector_id]["dim"]
+        if len(buf) != dim * 4:
+            logging.error(f"Payload length mismatch for vec{vector_id}: expected {dim*4}, got {len(buf)}")
+            return
 
-        if "opcode" in resp:
-            if resp["opcode"] == "failure":
-                logging.error("fail to send the instance to the ai module")
+        fmt = f">{dim}f"
+        values = list(struct.unpack(fmt, buf))
+        logging.info(f"[vec{vector_id}] Received values: {values}")
 
-                if "reason" in resp:
-                    logging.error(resp["reason"])
-                else:
-                    logging.error("unknown error")
-                sys.exit(1)
-        else:
-            logging.error("unknown response")
-            sys.exit(1)
+        model_name = f"{self.name}_vec{vector_id}"
+        endpoint = "training" if is_training else "testing"
+        url = f"http://{self.caddr}:{self.cport}/{model_name}/{endpoint}"
+        response = requests.put(url, json=json.dumps({"value": values}))
+        result = response.json()
 
-    def parse_data(self, buf, is_training):
-        temp = int.from_bytes(buf[0:1], byteorder="big", signed=True)
-        humid = int.from_bytes(buf[1:2], byteorder="big", signed=True)
-        power = int.from_bytes(buf[2:4], byteorder="big", signed=True)
-        month = int.from_bytes(buf[4:5], byteorder="big", signed=True)
+        if result.get("opcode") == "failure":
+            logging.error(f"Failed to send data to AI module: {result.get('reason', 'unknown')}")
 
-        lst = [temp, humid, power, month]
-        logging.info("[temp, humid, power, month] = {}".format(lst))
-
-        self.send_instance(lst, is_training)
-
-
-    # TODO: You should implement your own protocol in this function
-    # The following implementation is just a simple example
     def handler(self, client):
-        logging.info("[*] Server starts to process the client's request")
+        for is_training, count in [(True, self.ntrain), (False, self.ntest)]:
+            for _ in range(count):
+                header = client.recv(2)
+                if len(header) < 2:
+                    logging.error("Incomplete header")
+                    return
+                opcode, vector_id = header[0], header[1]
 
-        ntrain = self.ntrain
-        url = "http://{}:{}/{}/training".format(self.caddr, self.cport, self.name)
+                if opcode != OPCODE_DATA:
+                    logging.error("Invalid opcode: {}".format(opcode))
+                    return
 
-        while True:
-            # opcode (1 byte): 
-            rbuf = client.recv(1)
-            opcode = int.from_bytes(rbuf, "big")
-            logging.debug("[*] opcode: {}".format(opcode))
+                dim = VECTOR_INFO.get(vector_id, {}).get("dim", 0)
+                if dim == 0:
+                    logging.error(f"Unknown vector ID: {vector_id}")
+                    return
 
-            if opcode == OPCODE_DATA:
-                logging.info("[*] data report from the edge")
-                rbuf = client.recv(5)
-                logging.debug("[*] received buf: {}".format(rbuf))
-                self.parse_data(rbuf, True)
-            else:
-                logging.error("[*] invalid opcode")
-                logging.error("[*] please try again")
-                sys.exit(1)
+                payload = client.recv(dim * 4)
+                if len(payload) != dim * 4:
+                    logging.error("Incomplete payload")
+                    return
 
-            ntrain -= 1
+                self.parse_and_send(vector_id, payload, is_training)
+                client.send(OPCODE_DONE.to_bytes(1, 'big'))
 
-            if ntrain > 0:
-                opcode = OPCODE_DONE
-                logging.debug("[*] send the opcode OPCODE_DONE")
-                client.send(int.to_bytes(opcode, 1, "big"))
-            else:
-                opcode = OPCODE_WAIT
-                logging.debug("[*] send the opcode OPCODE_WAIT")
-                client.send(int.to_bytes(opcode, 1, "big"))
-                break
+            if is_training:
+                for vid in VECTOR_INFO:
+                    url = f"http://{self.caddr}:{self.cport}/{self.name}_vec{vid}/training"
+                    try:
+                        requests.post(url)
+                    except:
+                        logging.warning(f"Training failed for vec{vid}")
 
-        result = requests.post(url)
-        response = json.loads(result.content)
-        logging.debug("[*] return: {}".format(response["opcode"]))
-    
-        ntest = self.ntest
-        url = "http://{}:{}/{}/testing".format(self.caddr, self.cport, self.name)
-        opcode = OPCODE_DONE
-        logging.debug("[*] send the opcode OPCODE_DONE")
-        client.send(int.to_bytes(opcode, 1, "big"))
+        client.send(OPCODE_QUIT.to_bytes(1, 'big'))
 
-        while ntest > 0:
-            # opcode (1 byte): 
-            rbuf = client.recv(1)
-            opcode = int.from_bytes(rbuf, "big")
-            logging.debug("[*] opcode: {}".format(opcode))
+        for vid in VECTOR_INFO:
+            model_name = f"{self.name}_vec{vid}"
+            url = f"http://{self.caddr}:{self.cport}/{model_name}/result"
+            try:
+                response = requests.get(url).json()
+                if response.get("opcode") == "success":
+                    logging.info(f"[Result - vec{vid}] Accuracy: {response['accuracy']}%, Correct: {response['correct']}, Incorrect: {response['incorrect']}")
+                else:
+                    logging.warning(f"[vec{vid}] Failed to get result: {response.get('reason', 'unknown')}")
+            except Exception as e:
+                logging.warning(f"[vec{vid}] Error retrieving result: {e}")
 
-            if opcode == OPCODE_DATA:
-                logging.info("[*] data report from the edge")
-                rbuf = client.recv(5)
-                logging.debug("[*] received buf: {}".format(rbuf))
-                self.parse_data(rbuf, False)
-            else:
-                logging.error("[*] invalid opcode")
-                logging.error("[*] please try again")
-                sys.exit(1)
-
-            ntest -= 1
-
-            if ntest > 0:
-                opcode = OPCODE_DONE
-                client.send(int.to_bytes(opcode, 1, "big"))
-            else:
-                opcode = OPCODE_QUIT
-                client.send(int.to_bytes(opcode, 1, "big"))
-                break
-
-        url = "http://{}:{}/{}/result".format(self.caddr, self.cport, self.name)
-        result = requests.get(url)
-        response = json.loads(result.content)
-        logging.debug("response: {}".format(response))
-        if "opcode" not in response:
-            logging.error("invalid response from the AI module: no opcode is specified")
-            logging.error("please try again")
-            sys.exit(1)
-        else:
-            if response["opcode"] == "failure":
-                logging.error("getting the result from the AI module failed")
-                if "reason" in response:
-                    logging.error(response["reason"])
-                logging.error("please try again")
-                sys.exit(1)
-            elif response["opcode"] == "success":
-                self.print_result(response)
-            else:
-                logging.error("unknown error")
-                logging.error("please try again")
-                sys.exit(1)
-
-    def print_result(self, result):
-        logging.info("=== Result of Prediction ({}) ===".format(self.name))
-        logging.info("   # of instances: {}".format(result["num"]))
-        logging.debug("   sequence: {}".format(result["sequence"]))
-        logging.debug("   prediction: {}".format(result["prediction"]))
-        logging.info("   correct predictions: {}".format(result["correct"]))
-        logging.info("   incorrect predictions: {}".format(result["incorrect"]))
-        logging.info("   accuracy: {}\%".format(result["accuracy"]))
-
-def command_line_args():
+def parse_args():
     parser = argparse.ArgumentParser()
-    parser.add_argument("-a", "--algorithm", metavar="<AI algorithm to be used>", help="AI algorithm to be used", type=str, required=True)
-    parser.add_argument("-d", "--dimension", metavar="<Dimension of each instance>", help="Dimension of each instance", type=int, default=1)
-    parser.add_argument("-b", "--caddr", metavar="<AI module's IP address>", help="AI module's IP address", type=str, required=True)
-    parser.add_argument("-c", "--cport", metavar="<AI module's listening port>", help="AI module's listening port", type=int, required=True)
-    parser.add_argument("-p", "--lport", metavar="<server's listening port>", help="Server's listening port", type=int, required=True)
-    parser.add_argument("-n", "--name", metavar="<model name>", help="Name of the model", type=str, default="model")
-    parser.add_argument("-x", "--ntrain", metavar="<number of instances for training>", help="Number of instances for training", type=int, default=10)
-    parser.add_argument("-y", "--ntest", metavar="<number of instances for testing>", help="Number of instances for testing", type=int, default=10)
-    parser.add_argument("-z", "--index", metavar="<the index number for the power value>", help="Index number for the power value", type=int, default=0)
-    parser.add_argument("-l", "--log", metavar="<log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)>", help="Log level (DEBUG/INFO/WARNING/ERROR/CRITICAL)", type=str, default="INFO")
-    args = parser.parse_args()
-    return args
+    parser.add_argument("--name", required=True)
+    parser.add_argument("--algorithm", required=True)
+    parser.add_argument("--lport", type=int, required=True)
+    parser.add_argument("--caddr", required=True)
+    parser.add_argument("--cport", type=int, required=True)
+    parser.add_argument("--ntrain", type=int, default=10)
+    parser.add_argument("--ntest", type=int, default=10)
+    return parser.parse_args()
 
 def main():
-    args = command_line_args()
-    logging.basicConfig(level=args.log)
-
-    if args.ntrain <= 0 or args.ntest <= 0:
-        logging.error("Number of instances for training or testing should be larger than 0")
-        sys.exit(1)
-
-    Server(args.name, args.algorithm, args.dimension, args.index, args.lport, args.caddr, args.cport, args.ntrain, args.ntest)
+    args = parse_args()
+    logging.basicConfig(level=logging.INFO)
+    Server(args.name, args.algorithm, args.lport, args.caddr, args.cport, args.ntrain, args.ntest)
 
 if __name__ == "__main__":
     main()

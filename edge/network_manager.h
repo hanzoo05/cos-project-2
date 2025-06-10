@@ -23,7 +23,7 @@ class NetworkManager {
     int getPort();
 
     int init();
-    int sendData(uint8_t *data, int dlen);
+    int sendData(uint8_t *data, int dlen, uint8_t vector_id);
     uint8_t receiveCommand();
 };
 
